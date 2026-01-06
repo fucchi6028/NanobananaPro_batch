@@ -1,0 +1,10 @@
+{
+    "api_key": "your-kie-ai-api-key-here",
+    "default_model": "google/nano-banana-pro",
+    "default_resolution": "2K",
+    "default_aspect_ratio": "1:1",
+    "output_directory": "./outputs",
+    "poll_interval": 3.0,
+    "task_timeout": 300.0,
+    "request_delay_seconds": 2.0
+}
