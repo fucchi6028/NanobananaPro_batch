@@ -1061,7 +1061,8 @@ def create_ui():
                                     font-size: 0.85rem;
                                     color: #f5576c;
                                 ">
-                                    生成に失敗した場合、<strong>file2（服装・ポーズ）</strong>の画像を指定フォルダに自動移動します
+                                    <strong>NSFW/コンテンツポリシー違反</strong>の場合のみ、<strong>file2（服装・ポーズ）</strong>の画像を自動移動します<br>
+                                    <span style="color: #a0a0b0; font-size: 0.8rem;">※ネットワークエラー等の一時的なエラーでは移動しません</span>
                                 </div>
                             """)
                             error_folder_input = gr.Textbox(

@@ -197,6 +197,41 @@ class BatchProcessor:
                 "error_message": error_message
             })
 
+    def _is_content_policy_error(self, error_message: str) -> bool:
+        """
+        コンテンツポリシー違反エラーかどうかを判定
+
+        Args:
+            error_message: エラーメッセージ
+
+        Returns:
+            NSFWやコンテンツポリシー違反の場合True
+        """
+        if not error_message:
+            return False
+
+        error_lower = error_message.lower()
+
+        # コンテンツポリシー関連のキーワード
+        content_error_keywords = [
+            "nsfw",
+            "content policy",
+            "content_policy",
+            "policy violation",
+            "inappropriate",
+            "safety",
+            "moderation",
+            "banned",
+            "prohibited",
+            "explicit",
+            "adult content",
+            "violates",
+            "not allowed",
+            "restricted",
+        ]
+
+        return any(keyword in error_lower for keyword in content_error_keywords)
+
     def _move_error_image(self, image_path: str, error_folder: str) -> bool:
         """
         エラー画像を指定フォルダに移動
@@ -497,27 +532,33 @@ class BatchProcessor:
                     )
                 else:
                     # 失敗
+                    error_msg = result.error or "Unknown error"
+                    print(f"[DEBUG] Task {db_task_id} failed with error: {error_msg}")
+
                     self.db.update_task_status(
                         db_task_id, "failed",
                         api_request_id=result.task_id,
-                        error_message=result.error,
+                        error_message=error_msg,
                         api_response=result.raw_response
                     )
                     self.db.increment_batch_job_count(job_id, completed=False)
                     results["failed"] += 1
 
-                    # file2（outfit）のエラー画像を移動
+                    # コンテンツポリシー違反の場合のみ、file2（outfit）の画像を移動
                     if config.error_folder and task["outfit_image_path"]:
-                        if self._move_error_image(task["outfit_image_path"], config.error_folder):
-                            results["moved_images"] = results.get("moved_images", 0) + 1
-                            print(f"[INFO] Moved error image for task {db_task_id}: {task['outfit_image_path']}")
+                        if self._is_content_policy_error(error_msg):
+                            if self._move_error_image(task["outfit_image_path"], config.error_folder):
+                                results["moved_images"] = results.get("moved_images", 0) + 1
+                                print(f"[INFO] Content policy error - moved image: {task['outfit_image_path']}")
+                        else:
+                            print(f"[DEBUG] Non-content error, image not moved: {error_msg}")
 
                     self._notify_progress(
-                        f"Failed {i+1}/{len(tasks)}: {result.error}",
+                        f"Failed {i+1}/{len(tasks)}: {error_msg}",
                         progress=progress,
                         task_id=db_task_id,
                         status="failed",
-                        error_message=result.error
+                        error_message=error_msg
                     )
 
                 # リクエスト間隔（レート制限対策）
