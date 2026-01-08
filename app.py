@@ -397,10 +397,19 @@ def start_batch_generation(
     created = processor.prepare_tasks(job_id, config)
     yield f"✓ {created}個のタスクを準備完了"
 
+    # エラー詳細を保存
+    error_details = []
+
     def on_progress(data):
         msg = data.get("message", "")
         prog = data.get("progress", 0) / 100
         progress(0.1 + prog * 0.9, desc=msg)
+
+        # エラーの場合は詳細を保存
+        if data.get("status") == "failed":
+            error_msg = data.get("error_message") or msg
+            error_details.append(error_msg)
+            print(f"[UI] Task failed: {error_msg}")
 
     processor.set_progress_callback(on_progress)
 
@@ -415,6 +424,14 @@ def start_batch_generation(
         if moved_count > 0:
             moved_info = f"\n📦 エラー画像移動: {moved_count}枚を {error_folder} に移動しました"
 
+        # エラー詳細を表示（最大5件）
+        error_info = ""
+        if error_details:
+            unique_errors = list(set(error_details))[:5]
+            error_info = "\n\n❌ エラー詳細:\n" + "\n".join(f"  • {e}" for e in unique_errors)
+            if len(error_details) > 5:
+                error_info += f"\n  ...他 {len(error_details) - 5} 件"
+
         summary = f"""
 ✅ バッチ処理完了!
 
@@ -426,7 +443,7 @@ def start_batch_generation(
   中断:     {'あり' if results['stopped'] else 'なし'}
 ━━━━━━━━━━━━━━━━━━━━
 
-🔖 ジョブID: #{job_id}{moved_info}
+🔖 ジョブID: #{job_id}{moved_info}{error_info}
 """
         yield summary.strip()
 

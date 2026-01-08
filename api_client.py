@@ -333,14 +333,21 @@ class KieAPI:
                 if data is None:
                     data = {}
 
-                # kie.ai のエラーレスポンスをチェック (code != 0 or code >= 400)
+                # kie.ai のエラーレスポンスをチェック
+                # code: 200 = 成功, 401 = 認証エラー, 402 = クレジット不足,
+                # 501 = 生成失敗, 429 = レート制限 など
                 api_code = data.get("code")
-                if api_code and api_code >= 400:
-                    error_msg = data.get("msg") or f"API Error code {api_code}"
-                    print(f"[DEBUG] API Error: {error_msg}")
+                api_msg = data.get("msg") or ""
+
+                print(f"[DEBUG] API code: {api_code}, msg: {api_msg}")
+
+                # code が 200 以外はエラー
+                if api_code is not None and api_code != 200:
+                    error_msg = api_msg or f"API Error code {api_code}"
+                    print(f"[ERROR] API Error: code={api_code}, msg={error_msg}")
                     return GenerationResult(
                         success=False,
-                        error=error_msg,
+                        error=f"[{api_code}] {error_msg}",
                         raw_response=data
                     )
 
