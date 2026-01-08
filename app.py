@@ -309,9 +309,11 @@ def start_batch_generation(
     allow_duplicates: bool,
     request_delay: float,
     error_folder: str,
+    auto_download: bool,
+    queue_count: int,
     progress=gr.Progress()
 ):
-    """バッチ生成を開始"""
+    """バッチ生成を開始（自動ダウンロード・連続実行対応）"""
     global current_thread
 
     if not api or not processor:
@@ -327,6 +329,8 @@ def start_batch_generation(
         yield "エラー: 生成枚数は1以上を指定してください"
         return
 
+    queue_count = max(1, int(queue_count))
+
     # 設定を保存
     save_batch_settings({
         "face_path": face_path,
@@ -340,7 +344,9 @@ def start_batch_generation(
         "aspect_ratio": aspect_ratio,
         "allow_duplicates": allow_duplicates,
         "request_delay": request_delay,
-        "error_folder": error_folder
+        "error_folder": error_folder,
+        "auto_download": auto_download,
+        "queue_count": queue_count
     })
 
     # 画像ソースは任意（プロンプトのみでも可）
@@ -413,42 +419,122 @@ def start_batch_generation(
 
     processor.set_progress_callback(on_progress)
 
-    yield "🚀 生成開始..."
-    progress(0.1, desc="生成開始...")
+    # キュー処理用のカウンター
+    total_jobs = queue_count
+    completed_jobs = 0
+    all_results = []
 
-    try:
-        results = processor.run_batch(job_id, config)
+    for queue_index in range(queue_count):
+        # キュー進捗を表示
+        if queue_count > 1:
+            yield f"🔄 キュー {queue_index + 1}/{queue_count} を開始..."
 
-        moved_count = results.get("moved_images", 0)
-        moved_info = ""
-        if moved_count > 0:
-            moved_info = f"\n📦 エラー画像移動: {moved_count}枚を {error_folder} に移動しました"
+        # 2回目以降は新しいジョブを作成
+        if queue_index > 0:
+            # 画像ソースを再スキャン（移動されたファイルを除外）
+            face_source = ImageSource(face_path) if face_path else None
+            outfit_source = ImageSource(outfit_path) if outfit_path else None
+            bg_source = ImageSource(bg_path) if bg_path else None
+            prompt_source = PromptSource(prompt_folder) if prompt_folder else None
 
-        # エラー詳細を表示（最大5件）
-        error_info = ""
-        if error_details:
-            unique_errors = list(set(error_details))[:5]
-            error_info = "\n\n❌ エラー詳細:\n" + "\n".join(f"  • {e}" for e in unique_errors)
-            if len(error_details) > 5:
-                error_info += f"\n  ...他 {len(error_details) - 5} 件"
+            config = BatchConfig(
+                name=f"{job_name or 'batch'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                total_count=int(total_count),
+                prompt_template=prompt_template,
+                face_source=face_source,
+                outfit_source=outfit_source,
+                background_source=bg_source,
+                prompt_source=prompt_source,
+                model=model,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                allow_duplicate_combinations=allow_duplicates,
+                request_delay=request_delay,
+                error_folder=error_folder
+            )
 
-        summary = f"""
-✅ バッチ処理完了!
+            yield f"📋 ジョブを作成中... (キュー {queue_index + 1}/{queue_count})"
+            job_id = processor.create_batch_job(config)
+            yield f"✓ ジョブ作成完了: #{job_id}"
 
-📊 結果サマリー
-━━━━━━━━━━━━━━━━━━━━
-  合計:     {results['total']}枚
-  成功:     {results['completed']}枚
-  失敗:     {results['failed']}枚
-  中断:     {'あり' if results['stopped'] else 'なし'}
-━━━━━━━━━━━━━━━━━━━━
+            yield "📋 タスクを準備中..."
+            created = processor.prepare_tasks(job_id, config)
+            yield f"✓ {created}個のタスクを準備完了"
 
-🔖 ジョブID: #{job_id}{moved_info}{error_info}
+            # エラー詳細をリセット
+            error_details.clear()
+
+        yield f"🚀 生成開始... (キュー {queue_index + 1}/{queue_count})"
+        progress(0.1, desc=f"キュー {queue_index + 1}/{queue_count} 生成中...")
+
+        try:
+            results = processor.run_batch(job_id, config)
+            all_results.append({"job_id": job_id, "results": results})
+
+            moved_count = results.get("moved_images", 0)
+            moved_info = ""
+            if moved_count > 0:
+                moved_info = f"\n📦 エラー画像移動: {moved_count}枚"
+
+            # エラー詳細を表示（最大3件）
+            error_info = ""
+            if error_details:
+                unique_errors = list(set(error_details))[:3]
+                error_info = "\n❌ エラー: " + ", ".join(unique_errors[:2])
+
+            batch_summary = f"""
+✅ キュー {queue_index + 1}/{queue_count} 完了!
+  成功: {results['completed']}枚 / 失敗: {results['failed']}枚{moved_info}{error_info}
 """
-        yield summary.strip()
+            yield batch_summary.strip()
 
-    except Exception as e:
-        yield f"❌ エラー: {str(e)}"
+            # 停止フラグがセットされていたら中断
+            if results.get("stopped"):
+                yield "⏹️ キュー処理を中断しました"
+                break
+
+            # 自動ダウンロード
+            if auto_download and results['completed'] > 0:
+                yield f"📥 自動ダウンロード中... (ジョブ #{job_id})"
+                progress(0.9, desc="ダウンロード中...")
+
+                try:
+                    dl_results = downloader.download_batch_results(job_id)
+                    yield f"✓ ダウンロード完了: {dl_results['downloaded']}枚"
+                except Exception as dl_error:
+                    yield f"⚠️ ダウンロードエラー: {str(dl_error)}"
+
+            completed_jobs += 1
+
+            # 次のキューの前に少し待機（レート制限対策）
+            if queue_index < queue_count - 1:
+                yield "⏳ 次のキューを準備中..."
+                import time
+                time.sleep(2)
+
+        except Exception as e:
+            yield f"❌ エラー (キュー {queue_index + 1}): {str(e)}"
+            break
+
+    # 最終サマリー
+    if queue_count > 1:
+        total_completed = sum(r["results"]["completed"] for r in all_results)
+        total_failed = sum(r["results"]["failed"] for r in all_results)
+        job_ids = [str(r["job_id"]) for r in all_results]
+
+        final_summary = f"""
+🎉 全キュー処理完了!
+
+📊 総合サマリー
+━━━━━━━━━━━━━━━━━━━━
+  完了キュー: {completed_jobs}/{queue_count}
+  総成功:     {total_completed}枚
+  総失敗:     {total_failed}枚
+━━━━━━━━━━━━━━━━━━━━
+
+🔖 ジョブID: #{', #'.join(job_ids)}
+"""
+        yield final_summary.strip()
 
 
 def stop_batch():
@@ -1089,6 +1175,42 @@ def create_ui():
                                 lines=1
                             )
 
+                        with gr.Accordion("🔄 自動化・キュー設定", open=True):
+                            gr.HTML("""
+                                <div style="
+                                    background: rgba(59, 130, 246, 0.15);
+                                    border: 1px solid rgba(59, 130, 246, 0.4);
+                                    border-radius: 8px;
+                                    padding: 0.8rem;
+                                    margin-bottom: 0.5rem;
+                                    font-size: 0.85rem;
+                                    color: #3b82f6;
+                                ">
+                                    生成完了後に自動ダウンロード、複数回の連続実行が可能です
+                                </div>
+                            """)
+                            auto_download_input = gr.Checkbox(
+                                label="✅ 生成完了後に自動ダウンロード",
+                                value=batch_settings.get("auto_download", True)
+                            )
+                            queue_count_input = gr.Number(
+                                label="🔁 連続実行回数（キュー）",
+                                value=batch_settings.get("queue_count", 1),
+                                minimum=1,
+                                maximum=100,
+                                precision=0
+                            )
+                            gr.HTML("""
+                                <div style="
+                                    font-size: 0.8rem;
+                                    color: #a0a0b0;
+                                    margin-top: 0.3rem;
+                                ">
+                                    ※ キュー2以上: 前の処理のダウンロード完了後に次を開始<br>
+                                    ※ エラー画像は自動的に除外されます
+                                </div>
+                            """)
+
                 # 実行ボタン
                 with gr.Row():
                     start_btn = gr.Button(
@@ -1115,7 +1237,8 @@ def create_ui():
                         face_input, outfit_input, bg_input,
                         total_count_input, model_input, resolution_input,
                         aspect_ratio_input, allow_duplicates_input,
-                        delay_input, error_folder_input
+                        delay_input, error_folder_input,
+                        auto_download_input, queue_count_input
                     ],
                     outputs=[progress_output]
                 )
